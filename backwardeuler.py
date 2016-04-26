@@ -69,6 +69,7 @@ d2vdv2  = lambda eta: numpy.cosh( d*eta ) * d**2 * beta
 
 xi  =  xi[1:-1]
 eta = eta[1:-1]
+
 # Boundary condition 
 # For left bc i.e. xi[0] 
 _l = 2.0 / ( 1.0 + 0.5 * delta_xi * d2Sdxi2(xi[1]) )
