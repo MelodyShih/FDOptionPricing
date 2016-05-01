@@ -24,8 +24,8 @@ S_max = 200
 S_min = 0
 v_max = 1.0
 
-alpha = 1.0 #???
-beta  = 1.0 #???
+alpha = 1.0 
+beta  = 1.0 
 c1    = numpy.arcsinh( (S_max - K)/alpha )
 c2    = numpy.arcsinh( (S_min - K)/alpha )
 d1     = numpy.arcsinh( v_max/beta )
@@ -64,6 +64,9 @@ xi  = numpy.linspace(0, 1, N+2)
 eta = numpy.linspace(0, 1, M+2)
 t   = numpy.linspace(0, t_final, L)
 
+xi  =  xi[1:-1] # Need this
+eta = eta[1:-1] # Need this
+
 delta_xi  =  xi[1] -  xi[0]
 delta_eta = eta[1] - eta[0]
 delta_t   =   t[1] -   t[0]
@@ -76,12 +79,11 @@ d2Sdxi2 = lambda xi: numpy.sinh( c1*xi + c2*(1-xi) ) * (c1 - c2)**2
 dvdeta  = lambda eta: numpy.cosh( d1*eta ) * d1 * beta
 d2vdeta2  = lambda eta: numpy.cosh( d1*eta ) * d1**2 * beta
 
-xi  =  xi[1:-1] # Need this
-eta = eta[1:-1] # Need this
+
 
 # Allocate solution vector U
 U = numpy.empty([N+2, M+2])
-U_interior = U([1:-1], [1:-1])
+U_interior = U[1:-1, 1:-1]
 
 # Note: row-wise reshape, 
 # a = [[1,2,3]
@@ -91,7 +93,8 @@ U_interior = U([1:-1], [1:-1])
 #
 # U_hat = [U[1,1], U[1,2], ..., U[1, M], U[2,1], ..., U[2,M], ..., U[N,1], ..., U[N,M]]
 
-U_hat = U_interior.reshape(N*M)
+U_interior_old = numpy.zeros(N*M)
+U_interior_new = numpy.zeros(N*M)
 
 # Construct A
 # Size: MN * MN
@@ -109,12 +112,11 @@ f = lambda i,j: sigma**2*delta_t/(2*delta_eta**2)*v(eta[j])/dvdeta(eta[i])**2 + 
 # Allocate memory
 A = numpy.zeros([M*N, M*N])
 rhs = numpy.zeros(N*M)
-U_old = numpy.zeros(N*M)
-U_new = numpy.zeros(N*M)
+
 
 # Initialize the U vector
 for i in range(N):
-	U_old[i*M: (i+1)*M] = numpy.ones(M) * xi[i]
+	U_interior_old[i*M: (i+1)*M] = numpy.maximum(numpy.ones(M) * xi[i] - K , 0.0)
 
 # Boundary condition 
 # For bottom bc xi = 0 
@@ -144,8 +146,6 @@ for irow in range(M*N):
             A[irow, irow + M]     = -e(i,j)
             A[irow, irow - 1]     = -b(i,j)
             A[irow, irow]         =  d(i,j)
-            # Use bc for eta = 1
-            rhs[irow] = -a(i,j)*S(xi[i-1]) + f(i,j)*S(xi[i]) + a(i,j)*S(xi[i+1])
         else: # Add term for bc condition
             A[irow, irow + M - 1] =  a(i,j) - a(i,j)*l_
             A[irow, irow + M]     = -e(i,j) - c(i,j)*l_
@@ -164,8 +164,6 @@ for irow in range(M*N):
             A[irow, irow - M ]    = -c(i,j)
             A[irow, irow - 1]     = -b(i,j)
             A[irow, irow]         =  d(i,j)
-            # Use bc for eta = 1
-            rhs[irow] = -a(i,j)*S(xi[i-1]) + f(i,j)*S(xi[i]) + a(i,j)*S(xi[i+1])
         else:
             A[irow, irow - M - 1] = -a(i,j) + a(i,j)*_r
             A[irow, irow - M ]    = -c(i,j) - e(i,j)*_r
@@ -207,7 +205,7 @@ for timestep in t:
 	alpha_bc = numpy.multiply( (r-q) * delta_t/(2.0 * delta_xi), numpy.divide(S(xi), dSdxi(xi)) ) # vector
 	beta_bc = kappa*theta*delta_t / ( 2*delta_eta*dvdeta(0) )
 
-	maindiag = numpy.ones(1+r*delta_t)
+	maindiag = numpy.ones(N)*(1+r*delta_t)
 	maindiag[0] += alpha_bc[0] * _l
 	maindiag[-1] += alpha_bc[-1] * r_
 
@@ -218,25 +216,31 @@ for timestep in t:
 	lowerdiag[:-1] = alpha_bc[1:]
 	lowerdiag[-2] -= alpha_bc[-1]*_r
 
-	A_bc = sparse.spdiags([lowerdiag, maindiag, upperdiag], [-1, 0, 1], N, N)
+	A_bc = sparse.spdiags([lowerdiag, maindiag, upperdiag], [-1, 0, 1], N, N).tocsr()
 
 	#initialize U_bc vector
 	U_bc = numpy.zeros(N)
-	U_bc = numpy.maximum(0, numpy.substract(S(xi), K))
+	U_bc = numpy.maximum(0, S(xi) - K)
 
 	#rhs (Need U vector in previous time step)
 	rhs_bc = numpy.zeros(N)
 	for i in range(len(rhs_bc)):
-		rhs_bc = (-3.0 * beta_bc + 1)*U_bc[i] + 4.0*U_old[i*M] - beta*U_old[i*M]
+	    rhs_bc[i] = (-3.0 * beta_bc + 1)*U_bc[i] + 4.0*U_interior_old[i*M] - beta*U_interior_old[i*M]
 	U_bc = linalg.spsolve(A_bc, rhs_bc)
 
 	# After solve the lower boundary condition, update the corresponding rhs
 	for i in range(N):
-		if i==0 || i==N-1:
-			pass
+		if i==0 or i==N-1:
+			continue
 		rhs[i*M] = a(i,0) * U_bc[i-1] + b(i,0) * U_bc[i] - a(i,0) * U_bc[i+1]
-	U_new = numpy.solve(A, U_old + rhs)
-	U_old = numpy.copy(U_new)
+
+	U_interior_new = linalg.spsolve(A, U_interior_old + rhs)
+	U_interior_old = numpy.copy(U_interior_new)
+
+U_interior = numpy.reshape(U_interior_new, [M, N])
+U[1:-1, 1:-1] = U_interior
+# Need to fill in boundary value
+
 
 
 
