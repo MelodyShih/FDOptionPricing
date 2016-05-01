@@ -1,4 +1,6 @@
 import numpy
+import scipy.sparse as sparse
+import scipy.sparse.linalg as linalg
 import matplotlib.pyplot as plt
 
 # Method of lines
@@ -74,8 +76,8 @@ d2Sdxi2 = lambda xi: numpy.sinh( c1*xi + c2*(1-xi) ) * (c1 - c2)**2
 dvdeta  = lambda eta: numpy.cosh( d1*eta ) * d1 * beta
 d2vdeta2  = lambda eta: numpy.cosh( d1*eta ) * d1**2 * beta
 
-xi  =  xi[1:-1]
-eta = eta[1:-1]
+xi  =  xi[1:-1] # Need this
+eta = eta[1:-1] # Need this
 
 # Allocate solution vector U
 U = numpy.empty([N+2, M+2])
@@ -104,87 +106,140 @@ e = lambda i,j: delta_t/delta_xi**2*v(eta[j])*S(xi[i])**2/dSdxi(xi[i])**2 + \
 f = lambda i,j: sigma**2*delta_t/(2*delta_eta**2)*v(eta[j])/dvdeta(eta[i])**2 + \
 				delta_t/(2.0*delta_eta)*(kappa*(theta - v(eta[j]))/dvdeta(eta[j]) - 0.5*sigma**2*v(eta[j])*d2vdeta2(eta[j])/dvdeta(eta[j])**3)
 
-A = numpy.empty([M*N, M*N])
+# Allocate memory
+A = numpy.zeros([M*N, M*N])
+rhs = numpy.zeros(N*M)
+U_old = numpy.zeros(N*M)
+U_new = numpy.zeros(N*M)
+
+# Initialize the U vector
+for i in range(N):
+	U_old[i*M: (i+1)*M] = numpy.ones(M) * xi[i]
+
+# Boundary condition 
+# For bottom bc xi = 0 
+_l = 2.0 * dSdxi(xi[0]) / ( dSdxi(xi[0]) + 0.5 * delta_xi * d2Sdxi2(xi[0]) )
+l_ = - ( dSdxi(xi[0]) - 0.5* delta_xi * d2Sdxi2(xi[0]) ) / ( dSdxi(xi[0]) + 0.5* delta_xi* d2Sdxi2(xi[0]) )
+
+# For upper bc xi = 1
+_r = - ( dSdxi(xi[-1]) + 0.5 * delta_xi * d2Sdxi2(xi[-1]) ) / ( dSdxi(xi[-1]) - 0.5 * delta_xi * d2Sdxi2(xi[-1]) )
+r_ = 2.0 * dSdxi(xi[-1]) / ( dSdxi(xi[-1]) - 0.5 * delta_xi * d2Sdxi2(xi[-1]) )
+
+# For right bc eta = 1
+# rhs[i] = -a[i, M] * S(xi[i-1]) + f[i,M] * S(xi[i]) + a[i,j] * S(xi[i+1])
+
 for irow in range(M*N):
-    print irow
     # U_hat[irow] == U_interior[i,j]
     i = irow/M
     j = numpy.mod(irow, N)
 
     if( i == 0 ):
         if (j == 0):
-            A[irow, irow + M] = -f(i,j)
+            A[irow, irow + M]     = -e(i,j)
             A[irow, irow + M + 1] = -a(i,j)
-            A[irow, irow] = d(i,j)
-            A[irow, irow + 1] = e(i,j)
+            A[irow, irow]         =  d(i,j)
+            A[irow, irow + 1]     = -f(i,j)
         elif (j == M-1):
-            A[irow, irow + M - 1] = a(i,j)
-            A[irow, irow + M] = -f(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
-        else:
-            A[irow, irow + M - 1] = a(i,j)
-            A[irow, irow + M] = -f(i,j)
-            A[irow, irow + M + 1] = -a(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + 1] = e(i,j)
+            A[irow, irow + M - 1] =  a(i,j)
+            A[irow, irow + M]     = -e(i,j)
+            A[irow, irow - 1]     = -b(i,j)
+            A[irow, irow]         =  d(i,j)
+            # Use bc for eta = 1
+            rhs[irow] = -a(i,j)*S(xi[i-1]) + f(i,j)*S(xi[i]) + a(i,j)*S(xi[i+1])
+        else: # Add term for bc condition
+            A[irow, irow + M - 1] =  a(i,j) - a(i,j)*l_
+            A[irow, irow + M]     = -e(i,j) - c(i,j)*l_
+            A[irow, irow + M + 1] = -a(i,j) + a(i,j)*l_
+            A[irow, irow - 1]     = -b(i,j) - a(i,j)*_l
+            A[irow, irow]         =  d(i,j) - c(i,j)*_l
+            A[irow, irow + 1]     = -f(i,j) + a(i,j)*_l
     elif (i == N-1):
         if (j == 0):
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - M + 1] = a(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + 1] = e(i,j)
+            A[irow, irow - M ]    = -c(i,j)
+            A[irow, irow - M + 1] =  a(i,j)
+            A[irow, irow]         =  d(i,j)
+            A[irow, irow + 1]     = -f(i,j)
         elif (j == M-1):
             A[irow, irow - M - 1] = -a(i,j) 
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
+            A[irow, irow - M ]    = -c(i,j)
+            A[irow, irow - 1]     = -b(i,j)
+            A[irow, irow]         =  d(i,j)
+            # Use bc for eta = 1
+            rhs[irow] = -a(i,j)*S(xi[i-1]) + f(i,j)*S(xi[i]) + a(i,j)*S(xi[i+1])
         else:
-            A[irow, irow - M - 1] = -a(i,j) 
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - M + 1] = a(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + 1] = e(i,j)
+            A[irow, irow - M - 1] = -a(i,j) + a(i,j)*_r
+            A[irow, irow - M ]    = -c(i,j) - e(i,j)*_r
+            A[irow, irow - M + 1] =  a(i,j) - a(i,j)*_r
+            A[irow, irow - 1]     = -b(i,j) + a(i,j)*r_
+            A[irow, irow]         =  d(i,j) - e(i,j)*r_
+            A[irow, irow + 1]     = -f(i,j) - a(i,j)*r_
     else:
-        if (j == 0): 
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - M + 1] = a(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + 1] = e(i,j)
-            A[irow, irow + M]     = -f(i,j)
-            A[irow, irow + M + 1] = -a(i,j)
+        if (j == 0):   
+            A[irow, irow - M ]    = -e(i,j)
+            A[irow, irow - M + 1] = -a(i,j)
+            A[irow, irow]         =  d(i,j)
+            A[irow, irow + 1]     = -f(i,j)
+            A[irow, irow + M]     = -c(i,j)
+            A[irow, irow + M + 1] =  a(i,j)
         elif (j == M-1):
             A[irow, irow - M - 1] = -a(i,j) 
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + M - 1] = a(i,j)
-            A[irow, irow + M]     = -f(i,j)
+            A[irow, irow - M ]    = -c(i,j)
+            A[irow, irow - 1]     = -b(i,j)
+            A[irow, irow]         =  d(i,j)
+            A[irow, irow + M - 1] =  a(i,j)
+            A[irow, irow + M]     = -e(i,j)
+            rhs[irow] = -a(i,j)*S(xi[i-1]) + f(i,j)*S(xi[i]) + a(i,j)*S(xi[i+1])
         else:
             A[irow, irow - M - 1] = -a(i,j) 
-            A[irow, irow - M ]    = -b(i,j)
-            A[irow, irow - M + 1] = a(i,j)
-            A[irow, irow - 1] = -c(i,j)
-            A[irow, irow]     = d(i,j)
-            A[irow, irow + 1] = e(i,j)
-            A[irow, irow + M - 1] = a(i,j)
-            A[irow, irow + M]     = -f(i,j)
+            A[irow, irow - M ]    = -c(i,j)
+            A[irow, irow - M + 1] =  a(i,j)
+            A[irow, irow - 1]     = -b(i,j)
+            A[irow, irow]         =  d(i,j)
+            A[irow, irow + 1]     = -f(i,j)
+            A[irow, irow + M - 1] =  a(i,j)
+            A[irow, irow + M]     = -e(i,j)
             A[irow, irow + M + 1] = -a(i,j)
 
-# Boundary condition 
-# For left bc i.e. xi[0] 
-_l = 2.0 / ( 1.0 + 0.5 * delta_xi * d2Sdxi2(xi[1]) )
-l_ = - ( dSdxi(xi[1]) - 0.5 * d2Sdxi2(xi[1]) ) / ( dSdxi(xi[1]) + 0.5 * d2Sdxi2(xi[1]) )
+for timestep in t:
+	# For each time step, we need to first solve the pde for lower boundary condition
+	# lower bc
+	# Construct matrix A_bc for boundary condition
+	alpha_bc = numpy.multiply( (r-q) * delta_t/(2.0 * delta_xi), numpy.divide(S(xi), dSdxi(xi)) ) # vector
+	beta_bc = kappa*theta*delta_t / ( 2*delta_eta*dvdeta(0) )
 
-# For right bc i.e. xi[-1]
-_r = 2.0 / ( 1.0 - 0.5 * delta_xi * d2Sdxi2(xi[1]) )
-r_ = - ( dSdxi(xi[-1]) + 0.5 * d2Sdxi2(xi[-1]) ) / ( dSdxi(xi[-1]) - 0.5 * d2Sdxi2(xi[-1]) )
+	maindiag = numpy.ones(1+r*delta_t)
+	maindiag[0] += alpha_bc[0] * _l
+	maindiag[-1] += alpha_bc[-1] * r_
 
-# For upper bc i.e eta[-1] (Move to rhs)
-# rhs[i] = -a[i, M] * S(xi[i-1]) + f[i,M] * S(xi[i]) + a[i,j] * S(xi[i+1])
-rhs = numpy.empty(N*M)
-rhs[0:M-1] =  
+	upperdiag = -alpha_bc
+	upperdiag[0] += alpha_bc[0] * l_
 
-# For lower bc (requires us to first solve a firstorder two-dimensional PDE)
+	lowerdiag = numpy.zeros(N)
+	lowerdiag[:-1] = alpha_bc[1:]
+	lowerdiag[-2] -= alpha_bc[-1]*_r
+
+	A_bc = sparse.spdiags([lowerdiag, maindiag, upperdiag], [-1, 0, 1], N, N)
+
+	#initialize U_bc vector
+	U_bc = numpy.zeros(N)
+	U_bc = numpy.maximum(0, numpy.substract(S(xi), K))
+
+	#rhs (Need U vector in previous time step)
+	rhs_bc = numpy.zeros(N)
+	for i in range(len(rhs_bc)):
+		rhs_bc = (-3.0 * beta_bc + 1)*U_bc[i] + 4.0*U_old[i*M] - beta*U_old[i*M]
+	U_bc = linalg.spsolve(A_bc, rhs_bc)
+
+	# After solve the lower boundary condition, update the corresponding rhs
+	for i in range(N):
+		if i==0 || i==N-1:
+			pass
+		rhs[i*M] = a(i,0) * U_bc[i-1] + b(i,0) * U_bc[i] - a(i,0) * U_bc[i+1]
+	U_new = numpy.solve(A, U_old + rhs)
+	U_old = numpy.copy(U_new)
+
+
+
+
+
+
